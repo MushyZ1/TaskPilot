@@ -1,24 +1,13 @@
-from datetime import date
-
-from models import AgentDecision
-from agent import execute_decision
+from agent import process_request
 
 
-decision = AgentDecision(
-    action="create_task",
-    task_title="Finish Python assignment",
-    due_date=date(2026, 11, 12)
-)
+while True:
 
-result = execute_decision(decision)
+    user_request = input("\nYou: ")
 
-print("Agent result:", result)
+    if user_request.lower() in ["exit", "quit"]:
+        break
 
+    result = process_request(user_request)
 
-decision = AgentDecision(
-    action="list_tasks"
-)
-
-result = execute_decision(decision)
-
-print("\nAll tasks:", result)
+    print("\nTaskPilot:", result)
