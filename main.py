@@ -1,50 +1,62 @@
-
 from datetime import date
 
-from ollama import chat
-from models import AgentDecision
-
-MODEL = "qwen3:4b"
-
-system_prompt = f"""
-You are TaskPilot, an AI task management assistant.
-
-Today's date is {date.today().isoformat()}.
-
-Understand the user's task management request and decide
-which action should be performed.
-
-Convert relative dates into YYYY-MM-DD format.
-
-If the request is ambiguous, choose the clarify action
-and explain what information is missing.
-
-Return only the structured data matching the provided schema.
-"""
-
-response = chat(
-    model=MODEL,
-    messages=[
-        {
-            "role": "system",
-            "content": system_prompt
-        },
-        {
-            "role": "user",
-            "content": "Remind me to finish my Python assignment tomorrow."
-        }
-    ],
-    format=AgentDecision.model_json_schema()
+from task_store import (
+    create_task,
+    update_task,
+    delete_task,
+    complete_task,
+    list_tasks
 )
 
-if response.message.content is None:
-    raise ValueError("The model returned an empty response.")
-
-decision = AgentDecision.model_validate_json(
-    response.message.content
+# 1. Create two tasks
+task1 = create_task(
+    "Finish Python assignment",
+    date(2026, 11, 12)
 )
 
-print(decision)
-print("\nAction:", decision.action)
-print("Task:", decision.task_title)
-print("Due date:", decision.due_date)
+task2 = create_task("Learn FastAPI")
+
+print("\n--- CREATED TASKS ---")
+print(list_tasks())
+
+
+# 2. Update the first task
+updated = update_task(
+    task_id=task1.id,
+    new_title="Finish TaskPilot assignment"
+)
+
+print("\n--- UPDATED TASK ---")
+print(updated)
+
+
+# 3. Complete the first task
+completed = complete_task(task1.id)
+
+print("\n--- COMPLETED TASK ---")
+print(completed)
+
+
+# 4. Delete the second task
+deleted = delete_task(task2.id)
+
+print("\n--- DELETION RESULT ---")
+print(deleted)
+
+# Try updating a task that doesn't exist
+print(update_task("invalid-id", new_title="Test"))
+
+# Try deleting a task that doesn't exist
+print(delete_task("invalid-id"))
+
+# Try completing a task that doesn't exist
+print(complete_task("invalid-id"))
+
+# Try setting completed back to False
+print(update_task(task1.id, new_completed=False))
+
+
+# 5. List remaining tasks
+print("\n--- REMAINING TASKS ---")
+for task in list_tasks():
+    print(task)
