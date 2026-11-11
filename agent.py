@@ -3,6 +3,7 @@ import json
 from datetime import date, timedelta
 from ollama import chat
 import re
+import time
 
 
 from task_store import (
@@ -21,20 +22,44 @@ def validate_due_date(user_request: str, proposed_date: date | None):
     if proposed_date is None:
         return True
 
-    # Check whether the user mentioned a weekday.
     weekdays = [
         "monday", "tuesday", "wednesday",
         "thursday", "friday", "saturday", "sunday"
     ]
 
-    for weekday in weekdays:
-        if re.search(rf"\b{weekday}\b", user_request.lower()):
-            if proposed_date.strftime("%A").lower() != weekday:
-                return False
+    # Find weekday mentions in the order they appear.
+    mentioned_weekdays = re.findall(
+        r"\b(" + "|".join(weekdays) + r")\b",
+        user_request.lower()
+    )
 
-    return True
+    # If no weekday was mentioned, there is nothing to check.
+    if not mentioned_weekdays:
+        return True
 
-def interpret_request(user_request: str, date_feedback: str | None = None):
+    # Use the most recently mentioned weekday.
+    expected_weekday = mentioned_weekdays[-1]
+
+    return proposed_date.strftime("%A").lower() == expected_weekday
+
+
+def get_validation_text(
+    user_request: str,
+    conversation_context: list[str] | None
+):
+    if not conversation_context:
+        return user_request
+
+    user_messages = [
+        message.removeprefix("User: ")
+        for message in conversation_context
+        if message.startswith("User: ")
+    ]
+
+    return "\n".join(user_messages)
+
+
+def interpret_request(user_request: str, date_feedback: str | None = None, conversation_context: list[str] | None = None):
 
     existing_tasks = [
         task.model_dump(mode="json")
@@ -123,6 +148,23 @@ def interpret_request(user_request: str, date_feedback: str | None = None):
         Return a corrected decision using the required schema.
         """
 
+    if conversation_context:
+        user_message = "\n".join(conversation_context)
+
+        user_message += """
+
+        This is an ongoing conversation.
+        Interpret the latest user message in the context
+        of the original request and previous clarification.
+
+        Do not treat the latest message as an unrelated request.
+        Resolve the original request using the clarification.
+        """
+    else:
+        user_message = user_request
+
+    start_time = time.perf_counter()
+
     response = chat(
         model=MODEL,
         messages=[
@@ -132,11 +174,17 @@ def interpret_request(user_request: str, date_feedback: str | None = None):
             },
             {
                 "role": "user",
-                "content": user_request
+                "content": user_message
             }
         ],
-        format=AgentDecision.model_json_schema()
+        format=AgentDecision.model_json_schema(),
+        think=True
     )
+
+    end_time = time.perf_counter()
+
+
+    print(f"LLM response time: {end_time - start_time:.2f} seconds")
 
     if response.message.content is None:
         raise ValueError("The model returned an empty response.")
@@ -194,9 +242,19 @@ def execute_decision(decision: AgentDecision):
         return decision.clarification
 
 
-def process_request(user_request: str):
+def process_request(
+    user_request: str,
+    conversation_context: list[str] | None = None
+):
 
-    decision = interpret_request(user_request)
+    decision = interpret_request(
+        user_request,
+        conversation_context=conversation_context
+    )
+
+    # If the LLM needs clarification, return immediately.
+    if decision.action == "clarify":
+        return decision.clarification, True
 
     # Get the date proposed by the LLM.
     if decision.action == "create_task":
@@ -208,8 +266,14 @@ def process_request(user_request: str):
     else:
         proposed_date = None
 
+    # Include previous user messages when validating dates.
+    validation_text = get_validation_text(
+        user_request,
+        conversation_context
+    )
+
     # Validate the proposed date.
-    if not validate_due_date(user_request, proposed_date):
+    if not validate_due_date(validation_text, proposed_date):
 
         print("\nIncorrect date interpretation. Retrying...")
 
@@ -217,25 +281,37 @@ def process_request(user_request: str):
             user_request,
             date_feedback=(
                 f"You previously returned {proposed_date}, "
-                f"but the user requested a different weekday. "
+                f"but the user's requested weekday does not match. "
                 f"Reconsider the date using today's date: "
                 f"{date.today().isoformat()}."
-            )
+            ),
+            conversation_context=conversation_context
         )
 
-        # Validate the retry.
+        # The retry might itself require clarification.
+        if decision.action == "clarify":
+            return decision.clarification, True
+
+        # Get the date from the retry.
         if decision.action == "create_task":
             proposed_date = decision.due_date
+
         elif decision.action == "update_task":
             proposed_date = decision.new_due_date
+
         else:
             proposed_date = None
 
-        if not validate_due_date(user_request, proposed_date):
-            return "I'm unable to confidently determine the correct date. Could you clarify?"
+        # Validate the retry.
+        if not validate_due_date(validation_text, proposed_date):
+            return (
+                "I'm unable to confidently determine the correct date. "
+                "Could you clarify?",
+                True
+            )
 
     print("\nAgent decision:", decision)
 
-    return execute_decision(decision)
+    return execute_decision(decision), False
 
 
