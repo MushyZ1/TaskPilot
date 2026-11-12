@@ -218,3 +218,175 @@ def test_interpret_invalid_json(monkeypatch):
 
     with pytest.raises(ValidationError):
         agent.interpret_request("Create a task")
+
+
+def test_process_request_clarification(monkeypatch):
+    decision = AgentDecision(
+        action="clarify",
+        clarification="Which task do you mean?"
+    )
+
+    mock_interpret = Mock(return_value=decision)
+    mock_execute = Mock()
+
+    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
+    monkeypatch.setattr(agent, "execute_decision", mock_execute)
+
+    result, needs_clarification = agent.process_request(
+        "Delete my task"
+    )
+
+    assert result == "Which task do you mean?"
+    assert needs_clarification is True
+
+    mock_execute.assert_not_called()
+
+
+def test_process_request_success(monkeypatch):
+    decision = AgentDecision(
+        action="create_task",
+        task_title="Learn Python"
+    )
+
+    mock_interpret = Mock(return_value=decision)
+    mock_execute = Mock(return_value="Task created")
+
+    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
+    monkeypatch.setattr(agent, "execute_decision", mock_execute)
+    monkeypatch.setattr(agent, "get_validation_text",
+                        Mock(return_value="Create a task"))
+
+    result, needs_clarification = agent.process_request(
+        "Create a task to learn Python"
+    )
+
+    assert result == "Task created"
+    assert needs_clarification is False
+    mock_execute.assert_called_once_with(decision)
+
+
+def test_process_request_correct_date(monkeypatch):
+    decision = AgentDecision(
+        action="create_task",
+        task_title="Study AI",
+        due_date=date(2026, 11, 16)
+    )
+
+    monkeypatch.setattr(agent, "interpret_request",
+                        Mock(return_value=decision))
+    monkeypatch.setattr(agent, "get_validation_text", Mock(
+        return_value="Create a task by Monday"))
+    mock_execute = Mock(return_value="Task created")
+    monkeypatch.setattr(agent, "execute_decision", mock_execute)
+
+    monkeypatch.setattr(agent, "validate_due_date", Mock(return_value=True))
+
+    result, needs_clarification = agent.process_request(
+        "Create a task by Monday"
+    )
+
+    assert result == "Task created"
+    assert needs_clarification is False
+    mock_execute.assert_called_once_with(decision)
+
+
+def test_process_request_date_retry_success(monkeypatch):
+    first_decision = AgentDecision(
+        action="create_task",
+        task_title="Study AI",
+        due_date=date(2026, 11, 17)
+    )
+
+    corrected_decision = AgentDecision(
+        action="create_task",
+        task_title="Study AI",
+        due_date=date(2026, 11, 16)
+    )
+
+    mock_interpret = Mock(
+        side_effect=[first_decision, corrected_decision]
+    )
+
+    mock_validate = Mock(side_effect=[False, True])
+    mock_execute = Mock(return_value="Task created")
+
+    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
+    monkeypatch.setattr(agent, "validate_due_date", mock_validate)
+    monkeypatch.setattr(agent, "get_validation_text",
+                        Mock(return_value="Monday"))
+    monkeypatch.setattr(agent, "execute_decision", mock_execute)
+
+    result, needs_clarification = agent.process_request(
+        "Create a task by Monday"
+    )
+
+    assert result == "Task created"
+    assert needs_clarification is False
+
+    assert mock_interpret.call_count == 2
+    assert mock_validate.call_count == 2
+    mock_execute.assert_called_once_with(corrected_decision)
+
+
+def test_process_request_date_retry_failure(monkeypatch):
+    decision = AgentDecision(
+        action="create_task",
+        task_title="Study AI",
+        due_date=date(2026, 11, 17)
+    )
+
+    mock_interpret = Mock(return_value=decision)
+    mock_validate = Mock(return_value=False)
+    mock_execute = Mock()
+
+    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
+    monkeypatch.setattr(agent, "validate_due_date", mock_validate)
+    monkeypatch.setattr(agent, "get_validation_text",
+                        Mock(return_value="Monday"))
+    monkeypatch.setattr(agent, "execute_decision", mock_execute)
+
+    result, needs_clarification = agent.process_request(
+        "Create a task by Monday"
+    )
+
+    assert isinstance(result, str)
+    assert "unable to confidently determine" in result
+    assert needs_clarification is True
+
+    assert mock_interpret.call_count == 2
+    mock_execute.assert_not_called()
+
+
+def test_process_request_retry_clarification(monkeypatch):
+    first_decision = AgentDecision(
+        action="create_task",
+        task_title="Study AI",
+        due_date=date(2026, 11, 17)
+    )
+
+    retry_decision = AgentDecision(
+        action="clarify",
+        clarification="Could you confirm the date?"
+    )
+
+    mock_interpret = Mock(
+        side_effect=[first_decision, retry_decision]
+    )
+
+    mock_execute = Mock()
+
+    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
+    monkeypatch.setattr(agent, "validate_due_date", Mock(return_value=False))
+    monkeypatch.setattr(agent, "get_validation_text",
+                        Mock(return_value="Monday"))
+    monkeypatch.setattr(agent, "execute_decision", mock_execute)
+
+    result, needs_clarification = agent.process_request(
+        "Create a task by Monday"
+    )
+
+    assert result == "Could you confirm the date?"
+    assert needs_clarification is True
+
+    assert mock_interpret.call_count == 2
+    mock_execute.assert_not_called()

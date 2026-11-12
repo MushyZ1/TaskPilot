@@ -33,3 +33,17 @@ class Task(BaseModel):
     title: str
     due_date: date | None = None
     completed: bool = False
+
+
+class TaskCreate(BaseModel):
+    title: str
+    due_date: date | None = None
+
+
+class TaskUpdate(BaseModel):
+    title: str | None = None
+    due_date: date | None = None
+    completed: bool | None = None
+
+class AgentRequest(BaseModel):
+    user_request: str
