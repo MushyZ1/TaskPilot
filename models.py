@@ -45,5 +45,6 @@ class TaskUpdate(BaseModel):
     due_date: date | None = None
     completed: bool | None = None
 
+
 class AgentRequest(BaseModel):
     user_request: str

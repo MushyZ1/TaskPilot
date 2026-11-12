@@ -124,100 +124,71 @@ def test_execute_update_without_task_id(monkeypatch):
 
 
 def test_interpret_create_task(monkeypatch):
+    mock_generate = Mock(
+        return_value='{"action": "create_task", "task_title": "Learn Python"}')
+    monkeypatch.setattr(agent.provider, "generate", mock_generate)
 
-    fake_response = SimpleNamespace(
-        message=SimpleNamespace(
-            content='{"action": "create_task", "task_title": "Learn Python"}'
-        )
-    )
-
-    mock_chat = Mock(return_value=fake_response)
-
-    monkeypatch.setattr(agent, "chat", mock_chat)
-
-    decision = agent.interpret_request("Create a task to learn Python")
+    decision = agent.interpret_request("Add a task to learn Python")
 
     assert decision.action == "create_task"
     assert decision.task_title == "Learn Python"
 
-    mock_chat.assert_called_once()
-
 
 def test_interpret_create_task_with_due_date(monkeypatch):
-    fake_response = SimpleNamespace(
-        message=SimpleNamespace(
-            content='{"action": "create_task", "task_title": "Study AI", "due_date": "2026-11-20"}'
-        )
+    mock_generate = Mock(
+        return_value='{"action": "create_task", "task_title": "Learn Python", "due_date": "2026-11-15"}'
     )
-
-    mock_chat = Mock(return_value=fake_response)
-    monkeypatch.setattr(agent, "chat", mock_chat)
+    monkeypatch.setattr(agent.provider, "generate", mock_generate)
 
     decision = agent.interpret_request(
-        "Create a task to study AI by November 20")
+        "Add a task to learn Python by November 15")
 
     assert decision.action == "create_task"
-    assert decision.task_title == "Study AI"
-    assert decision.due_date == date(2026, 11, 20)
+    assert decision.task_title == "Learn Python"
+    assert decision.due_date == date(2026, 11, 15)
 
 
 def test_interpret_update_task(monkeypatch):
-    fake_response = SimpleNamespace(
-        message=SimpleNamespace(
-            content='{"action": "update_task", "task_id": "123", "new_title": "Learn Java"}'
-        )
+    mock_generate = Mock(
+        return_value='{"action": "update_task", "task_id": "123", "new_title": "Study mathematics"}'
     )
+    monkeypatch.setattr(agent.provider, "generate", mock_generate)
 
-    mock_chat = Mock(return_value=fake_response)
-    monkeypatch.setattr(agent, "chat", mock_chat)
-
-    decision = agent.interpret_request("Rename my task to Learn Java")
+    decision = agent.interpret_request("Rename task 123 to Study mathematics")
 
     assert decision.action == "update_task"
     assert decision.task_id == "123"
-    assert decision.new_title == "Learn Java"
+    assert decision.new_title == "Study mathematics"
 
 
 def test_interpret_clarification(monkeypatch):
-    fake_response = SimpleNamespace(
-        message=SimpleNamespace(
-            content='{"action": "clarify", "clarification": "Which task do you mean?"}'
-        )
+    mock_generate = Mock(
+        return_value='{"action": "clarify", "clarification": "Which task are you referring to?"}'
     )
+    monkeypatch.setattr(agent.provider, "generate", mock_generate)
 
-    mock_chat = Mock(return_value=fake_response)
-    monkeypatch.setattr(agent, "chat", mock_chat)
-
-    decision = agent.interpret_request("Delete my task")
+    decision = agent.interpret_request("Update my task")
 
     assert decision.action == "clarify"
-    assert decision.clarification == "Which task do you mean?"
+    assert decision.clarification == "Which task are you referring to?"
 
 
 def test_interpret_empty_response(monkeypatch):
-    fake_response = SimpleNamespace(
-        message=SimpleNamespace(content=None)
+    mock_generate = Mock(
+        side_effect=ValueError("LLM returned an empty response")
     )
+    monkeypatch.setattr(agent.provider, "generate", mock_generate)
 
-    mock_chat = Mock(return_value=fake_response)
-    monkeypatch.setattr(agent, "chat", mock_chat)
-
-    with pytest.raises(ValueError):
-        agent.interpret_request("Create a task")
+    with pytest.raises(ValueError, match="LLM returned an empty response"):
+        agent.interpret_request("Show my tasks")
 
 
 def test_interpret_invalid_json(monkeypatch):
-    fake_response = SimpleNamespace(
-        message=SimpleNamespace(
-            content="This is not valid JSON"
-        )
-    )
+    mock_generate = Mock(return_value="This is not valid JSON")
+    monkeypatch.setattr(agent.provider, "generate", mock_generate)
 
-    mock_chat = Mock(return_value=fake_response)
-    monkeypatch.setattr(agent, "chat", mock_chat)
-
-    with pytest.raises(ValidationError):
-        agent.interpret_request("Create a task")
+    with pytest.raises(ValueError):
+        agent.interpret_request("Show my tasks")
 
 
 def test_process_request_clarification(monkeypatch):

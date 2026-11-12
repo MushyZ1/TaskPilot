@@ -1,7 +1,7 @@
 from models import AgentDecision
 import json
 from datetime import date, timedelta
-from ollama import chat
+from llm_provider import get_provider
 import re
 import time
 
@@ -15,6 +15,8 @@ from task_store import (
 )
 
 MODEL = "qwen3:4b"
+
+provider = get_provider()
 
 
 def validate_due_date(user_request: str, proposed_date: date | None):
@@ -165,20 +167,12 @@ def interpret_request(user_request: str, date_feedback: str | None = None, conve
 
     start_time = time.perf_counter()
 
-    response = chat(
-        model=MODEL,
+    content = provider.generate(
         messages=[
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": user_message
-            }
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message}
         ],
-        format=AgentDecision.model_json_schema(),
-        think=True
+        response_format=AgentDecision.model_json_schema()
     )
 
     end_time = time.perf_counter()
@@ -186,12 +180,7 @@ def interpret_request(user_request: str, date_feedback: str | None = None, conve
 
     print(f"LLM response time: {end_time - start_time:.2f} seconds")
 
-    if response.message.content is None:
-        raise ValueError("The model returned an empty response.")
-
-    decision = AgentDecision.model_validate_json(
-        response.message.content
-    )
+    decision = AgentDecision.model_validate_json(content)
 
     return decision
 
