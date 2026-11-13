@@ -10,7 +10,7 @@ from datetime import date, timedelta
 from pydantic import ValidationError
 
 from llm_provider import LLMProvider, get_provider
-from models import AgentDecision, AgentPlan, AgentResponse, Task
+from models import MAX_ACTIONS, AgentDecision, AgentPlan, AgentResponse, Task
 from task_store import (
     complete_task,
     create_task,
@@ -51,19 +51,31 @@ def validate_due_date(
     user_request: str,
     proposed_date: date | None,
     latest_only: bool = True,
+    today: date | None = None,
 ) -> bool:
-    """Check that the proposed date falls on a weekday the user named.
+    """Check that the proposed date is one the user's words can explain.
 
-    With ``latest_only`` (a single task), the most recently mentioned weekday
-    must match. With several tasks in one request, each task may use any
-    weekday the user mentioned.
+    A date is fine if the user wrote it out (YYYY-MM-DD), said "today" or
+    "tomorrow" and it matches, or it falls on a weekday they named. With
+    ``latest_only`` (a single task), only the most recently named weekday
+    counts. With several tasks in one request, any named weekday will do.
     """
     if proposed_date is None:
         return True
 
-    mentioned = re.findall(
-        r"\b(" + "|".join(WEEKDAYS) + r")\b", user_request.lower()
-    )
+    text = user_request.lower()
+    today = today or date.today()
+
+    if proposed_date.isoformat() in text:
+        return True
+    if proposed_date == today and re.search(r"\btoday\b", text):
+        return True
+    if proposed_date == today + timedelta(days=1) and re.search(
+        r"\btomorrow\b", text
+    ):
+        return True
+
+    mentioned = re.findall(r"\b(" + "|".join(WEEKDAYS) + r")\b", text)
     if not mentioned:
         return True
 
@@ -130,13 +142,109 @@ def check_decision(decision: AgentDecision, today: date) -> str | None:
     return None
 
 
-def check_plan(plan: AgentPlan, today: date) -> str | None:
-    """Check every action in a plan. One bad action blocks the whole plan."""
+def _task_key(title: str, due: date | None) -> tuple[str, date | None]:
+    """Identity used to spot duplicates: same title (ignoring case and
+    extra spaces) and same due date."""
+    return " ".join(title.split()).casefold(), due
+
+
+DUPLICATE_HINT = (
+    "Reply 'duplicate' to add them anyway, or 'skip' to add only the new ones."
+)
+
+
+def _duplicate_indices(plan: AgentPlan) -> list[int]:
+    """Positions of create_task actions that repeat an open task, either one
+    already stored or one created earlier in the same plan."""
+    seen = {
+        _task_key(task.title, task.due_date)
+        for task in list_tasks()
+        if not task.completed
+    }
+    found = []
+    for i, decision in enumerate(plan.actions):
+        if decision.action != "create_task" or not decision.task_title:
+            continue
+        key = _task_key(decision.task_title, decision.due_date)
+        if key in seen:
+            found.append(i)
+        else:
+            seen.add(key)
+    return found
+
+
+def _duplicate_question(plan: AgentPlan, indices: list[int]) -> str:
+    first = plan.actions[indices[0]]
+    title = (first.task_title or "").strip()
+    due = f" due {first.due_date.isoformat()}" if first.due_date else ""
+    return (
+        f"{len(indices)} task(s) you asked for already exist, "
+        f"e.g. '{title}'{due}. {DUPLICATE_HINT}"
+    )
+
+
+def check_plan(
+    plan: AgentPlan, today: date, duplicates: str = "ask"
+) -> str | None:
+    """Check every action in a plan. One bad action blocks the whole plan.
+
+    ``duplicates``: "ask" asks the user about repeated tasks; "allow" and
+    "skip" mean the user has already answered that question.
+    """
     for decision in plan.actions:
         problem = check_decision(decision, today)
         if problem:
             return problem
+    if duplicates == "ask":
+        indices = _duplicate_indices(plan)
+        if indices:
+            return _duplicate_question(plan, indices)
     return None
+
+
+def _duplicate_choice(history: list[str] | None, reply: str) -> str | None:
+    """If the last question was the duplicate one, read the user's answer:
+    "allow", "skip", or "unclear". Otherwise None."""
+    if not history or DUPLICATE_HINT not in history[-1]:
+        return None
+    words = set(re.findall(r"[a-z']+", reply.lower()))
+    if words & {"duplicate", "anyway"}:
+        return "allow"
+    if "skip" in words:
+        return "skip"
+    return "unclear"
+
+
+# Plans waiting for the user's "duplicate or skip?" answer, keyed by the
+# question text. The answer runs the SAME plan; it is never sent back to the
+# LLM, which could return different actions the second time.
+_pending_duplicates: dict[str, AgentPlan] = {}
+MAX_PENDING = 50
+
+
+def _remember_plan(question: str, plan: AgentPlan) -> None:
+    if len(_pending_duplicates) >= MAX_PENDING:
+        _pending_duplicates.pop(next(iter(_pending_duplicates)))
+    _pending_duplicates[question] = plan
+
+
+def _run_confirmed_plan(plan: AgentPlan, duplicates: str) -> AgentResponse:
+    """Run a plan the user has answered the duplicate question for."""
+    problem = check_plan(plan, date.today(), duplicates)
+    if problem:
+        return _clarify(problem)
+
+    if duplicates == "skip":
+        repeated = set(_duplicate_indices(plan))
+        kept = [d for i, d in enumerate(plan.actions) if i not in repeated]
+        if not kept:
+            return AgentResponse(
+                message="Those tasks already exist, so nothing was added.",
+                action="skip",
+            )
+        plan = AgentPlan(actions=kept, note=plan.note)
+
+    return execute_plan(plan)
 
 
 def _first_clarification(plan: AgentPlan) -> str | None:
@@ -147,15 +255,17 @@ def _first_clarification(plan: AgentPlan) -> str | None:
     return None
 
 
-def _find_date_mismatch(plan: AgentPlan, validation_text: str) -> date | None:
+def _find_date_mismatch(
+    plan: AgentPlan, validation_text: str, latest_only: bool | None = None
+) -> date | None:
     """The first proposed date whose weekday contradicts the user's words."""
-    latest_only = len(plan.actions) == 1
+    if latest_only is None:
+        latest_only = len(plan.actions) == 1
     for decision in plan.actions:
         proposed = _proposed_date(decision)
         if not validate_due_date(validation_text, proposed, latest_only):
             return proposed
     return None
-
 
 # --------------------------------------------------------------------------
 # LLM interaction
@@ -189,7 +299,7 @@ def build_system_prompt(
         to take.
 
         Reply with a JSON object containing:
-        - actions: a list of one or more actions, run in order.
+        - actions: a list of one or more actions, run in order (at most {MAX_ACTIONS}; if the user asks for more, do the first {MAX_ACTIONS} and say in note which items were left out).
         - note: optional short text for anything you could not do.
 
         Available actions:
@@ -232,8 +342,8 @@ def build_system_prompt(
         10. If the user explicitly asks to create, add, or make a task,
             choose create_task.
         11. Never silently convert a create request into an update.
-        12. If an identical task already exists and the user requests
-            another one, ask whether they want a duplicate or an update.
+        12. Do not check for duplicates yourself. Return the create_task
+            actions as requested; the system handles duplicates.
         13. When a user mentions a weekday, use the corresponding date
             from the upcoming dates provided above. Never calculate
             weekday dates yourself.
@@ -406,6 +516,12 @@ def execute_plan(plan: AgentPlan) -> AgentResponse:
 
     if plan.note:
         response.message += f"\nNote: {plan.note}"
+    if len(plan.actions) >= MAX_ACTIONS:
+        response.message += (
+            f"\nNote: I ran {MAX_ACTIONS} actions, the most I do per "
+            "request. Anything beyond that was not done - please send it "
+            "as a separate request."
+        )
     return response
 
 
@@ -420,6 +536,21 @@ def process_request(
     ``history`` holds earlier turns ("User: ..." / "TaskPilot: ...") when the
     user is answering a clarification question.
     """
+    # An answer to the "duplicate or skip?" question is read here, in code,
+    # and runs the plan that was waiting. The LLM is not asked again.
+    choice = _duplicate_choice(history, user_request)
+    if history and choice == "unclear":
+        return _clarify(history[-1].removeprefix("TaskPilot: "))
+    if history and choice:
+        question = history[-1].removeprefix("TaskPilot: ")
+        pending = _pending_duplicates.pop(question, None)
+        if pending is None:
+            return _clarify(
+                "I lost track of that request (the server may have "
+                "restarted). Please send it again."
+            )
+        return _run_confirmed_plan(pending, choice)
+
     context = (history + [f"User: {user_request}"]) if history else None
     validation_text = get_validation_text(user_request, context)
     today = date.today()
@@ -436,7 +567,11 @@ def process_request(
         if question is not None:
             return _clarify(question)
 
-        bad_date = _find_date_mismatch(plan, validation_text)
+        bad_date = _find_date_mismatch(
+            plan, validation_text,
+            latest_only=len(plan.actions) == 1 and not history,
+        )
+
         if bad_date is None:
             break
 
@@ -457,6 +592,8 @@ def process_request(
 
     problem = check_plan(plan, today)
     if problem:
+        if DUPLICATE_HINT in problem:
+            _remember_plan(problem, plan)
         return _clarify(problem)
 
     logger.info("Agent plan: %s", plan)

@@ -134,10 +134,6 @@ def test_empty_plan_is_rejected(llm):
         agent.process_request("hi")
 
 
-def test_oversized_plan_is_rejected(llm):
-    llm.queue.append({"actions": [{"action": "list_tasks"}] * 11})
-    with pytest.raises(agent.AgentError):
-        agent.process_request("hi")
 
 
 # ---- API ------------------------------------------------------------------

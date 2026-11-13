@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+MAX_ACTIONS = 15  # most actions the agent will run for one request
 
 def _clean_title(value: str | None) -> str | None:
     """Strip whitespace and reject titles that are blank."""
@@ -41,7 +42,7 @@ class AgentDecision(BaseModel):
 class AgentPlan(BaseModel):
     """What the LLM returns: one or more actions, executed in order."""
 
-    actions: list[AgentDecision] = Field(min_length=1, max_length=10)
+    actions: list[AgentDecision] = Field(min_length=1, max_length=MAX_ACTIONS)
     # Anything the model could not do or chose to ignore, shown to the user.
     note: str | None = None
 
