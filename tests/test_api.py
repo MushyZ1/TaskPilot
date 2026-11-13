@@ -1,104 +1,77 @@
 from fastapi.testclient import TestClient
-from api import app
-from task_store import create_task, list_tasks
-import pytest
 
+import task_store as store
+from api import app
 
 client = TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def clean_tasks():
-    list_tasks().clear()
+def test_health():
+    assert client.get("/health").json() == {"status": "healthy"}
 
 
-def test_health_check():
-    response = client.get("/health")
+def test_task_crud_flow():
+    r = client.post(
+        "/api/tasks", json={"title": "Write report", "due_date": "2030-05-01"})
+    assert r.status_code == 201
+    task = r.json()
+    assert task["completed"] is False
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "healthy"}
+    assert client.get("/api/tasks").json() == [task]
+    assert client.get(f"/api/tasks/{task['id']}").json() == task
 
+    r = client.patch(f"/api/tasks/{task['id']}", json={"completed": True})
+    assert r.status_code == 200 and r.json()["completed"] is True
 
-def test_get_tasks():
-    create_task("Learn FastAPI")
-
-    response = client.get("/api/tasks")
-
-    assert response.status_code == 200
-
-    data = response.json()
-
-    assert len(data) == 1
-    assert data[0]["title"] == "Learn FastAPI"
-    assert data[0]["completed"] is False
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+    assert client.get("/api/tasks").json() == []
 
 
-def test_create_task():
-    response = client.post(
-        "/api/tasks",
-        json={"title": "Learn FastAPI"}
-    )
-
-    assert response.status_code == 201
-
-    data = response.json()
-
-    assert data["title"] == "Learn FastAPI"
-    assert data["completed"] is False
-    assert "id" in data
+def test_not_found():
+    assert client.get("/api/tasks/x").status_code == 404
+    assert client.patch("/api/tasks/x", json={"title": "a"}).status_code == 404
+    assert client.delete("/api/tasks/x").status_code == 404
 
 
-def test_update_task():
-    task = create_task("Learn Python")
-
-    response = client.patch(
-        f"/api/tasks/{task.id}",
-        json={"title": "Learn FastAPI"}
-    )
-
-    assert response.status_code == 200
-    assert response.json()["title"] == "Learn FastAPI"
+def test_validation_errors():
+    assert client.post("/api/tasks", json={"title": ""}).status_code == 422
+    assert client.post("/api/tasks", json={"title": "   "}).status_code == 422
+    assert client.post(
+        "/api/tasks", json={"title": "a", "due_date": "bad"}).status_code == 422
+    assert client.post("/api/tasks", json={}).status_code == 422
 
 
-def test_update_nonexistent_task():
-    response = client.patch(
-        "/api/tasks/nonexistent-id",
-        json={"title": "New title"}
-    )
-
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Task not found"
+def test_patch_requires_a_field():
+    task = store.create_task("A")
+    assert client.patch(f"/api/tasks/{task.id}", json={}).status_code == 400
 
 
-def test_delete_task():
-    task = create_task("Learn Python")
-
-    response = client.delete(f"/api/tasks/{task.id}")
-
-    assert response.status_code == 204
-    assert len(list_tasks()) == 0
-
-
-def test_delete_nonexistent_task():
-    response = client.delete("/api/tasks/nonexistent-id")
-
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Task not found"
+def test_agent_endpoint(llm):
+    llm.add(action="create_task", task_title="Buy milk")
+    r = client.post("/api/agent/execute",
+                    json={"user_request": "add buy milk"})
+    body = r.json()
+    assert r.status_code == 200
+    assert body["needs_clarification"] is False
+    assert body["task"]["title"] == "Buy milk"
 
 
-def test_execute_agent(monkeypatch):
-    def mock_process_request(user_request):
-        return "Task created successfully"
+def test_agent_endpoint_clarification_with_history(llm):
+    llm.add(action="clarify", clarification="Which task?")
+    r = client.post("/api/agent/execute", json={"user_request": "delete it"})
+    assert r.json()["needs_clarification"] is True
 
-    monkeypatch.setattr(
-        "api.process_request",
-        mock_process_request
-    )
+    llm.add(action="create_task", task_title="Call mom")
+    r = client.post("/api/agent/execute", json={
+        "user_request": "call mom",
+        "history": ["User: add a task", "TaskPilot: What is it?"],
+    })
+    assert r.json()["task"]["title"] == "Call mom"
 
-    response = client.post(
-        "/api/agent/execute",
-        json={"user_request": "Remind me to study Python"}
-    )
 
-    assert response.status_code == 200
-    assert response.json() == "Task created successfully"
+def test_agent_endpoint_validation_and_llm_failure(llm):
+    assert client.post("/api/agent/execute",
+                       json={"user_request": ""}).status_code == 422
+    llm.queue.append(ConnectionError("down"))
+    r = client.post("/api/agent/execute", json={"user_request": "hi"})
+    assert r.status_code == 502

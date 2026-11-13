@@ -1,56 +1,56 @@
-from agent import process_request
+"""Interactive command-line interface for TaskPilot."""
+
+from agent import AgentError, process_request
+from models import AgentResponse
 
 
-pending_context = None
+def format_response(response: AgentResponse) -> str:
+    lines = [response.message]
+    if response.action == "list_tasks":
+        for task in response.tasks or []:
+            mark = "x" if task.completed else " "
+            due = f" (due {task.due_date})" if task.due_date else ""
+            lines.append(f"  [{mark}] {task.title}{due}")
+    return "\n".join(lines)
 
 
-while True:
+def main() -> None:
+    print("TaskPilot - type 'exit' to quit, '/cancel' to drop a pending question.")
+    history: list[str] | None = None
 
-    user_request = input("\nYou: ").strip()
+    while True:
+        try:
+            text = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
 
-    if user_request.lower() in ["exit", "quit"]:
-        break
+        if not text:
+            continue
+        if text.lower() in ("exit", "quit"):
+            break
+        if text.lower() == "/cancel":
+            print("\nTaskPilot:", "Clarification cancelled." if history
+                  else "Nothing to cancel.")
+            history = None
+            continue
 
-    # Allow the user to cancel a pending clarification.
-    if user_request.lower() == "/cancel":
+        try:
+            response = process_request(text, history)
+        except AgentError as exc:
+            print("\nTaskPilot:", exc)
+            continue
 
-        if pending_context is not None:
-            pending_context = None
-            print("\nTaskPilot: Clarification cancelled.")
-
-        else:
-            print("\nTaskPilot: Nothing to cancel.")
-
-        continue
-
-    # No clarification is currently pending.
-    if pending_context is None:
-
-        result, needs_clarification = process_request(user_request)
-
-        if needs_clarification:
-
-            pending_context = [
-                f"User: {user_request}",
-                f"TaskPilot: {result}"
+        if response.needs_clarification:
+            history = (history or []) + [
+                f"User: {text}",
+                f"TaskPilot: {response.message}",
             ]
-
-    # We are waiting for the user's clarification.
-    else:
-
-        pending_context.append(f"User: {user_request}")
-
-        result, needs_clarification = process_request(
-            user_request,
-            conversation_context=pending_context
-        )
-
-        if needs_clarification:
-
-            pending_context.append(f"TaskPilot: {result}")
-
         else:
+            history = None
 
-            pending_context = None
+        print("\nTaskPilot:", format_response(response))
 
-    print("\nTaskPilot:", result)
+
+if __name__ == "__main__":
+    main()

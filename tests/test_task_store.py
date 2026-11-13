@@ -1,130 +1,56 @@
-import pytest
-from task_store import (
-    create_task,
-    update_task,
-    delete_task,
-    complete_task,
-    list_tasks
-)
-from models import Task
 from datetime import date
 
+import pytest
 
-@pytest.fixture(autouse=True)
-def clean_tasks():
-    list_tasks().clear()
+import task_store as store
 
-def test_create_task():
-    task = create_task(title="Python Task")
 
-    assert task.title == "Python Task"
+def test_create_and_list():
+    task = store.create_task("  Buy milk ", date(2030, 1, 1))
+    assert task.title == "Buy milk"
     assert task.completed is False
-    assert task.due_date is None
-    assert task.id is not None
+    assert [t.id for t in store.list_tasks()] == [task.id]
 
 
-def test_create_task_adds_to_list():
-    task = create_task(title="Python Task")
-
-    assert task in list_tasks()
-    assert len(list_tasks()) == 1
+def test_blank_title_rejected():
+    with pytest.raises(ValueError):
+        store.create_task("   ")
 
 
-def test_update_task_title():
-    task = create_task(title="Learn Python")
+def test_update_fields_independently():
+    task = store.create_task("A", date(2030, 1, 1))
 
-    updated_task = update_task(
-        task_id=task.id,
-        new_title="Learn Java"
-    )
+    updated = store.update_task(task.id, new_title="B")
+    assert updated is not None
+    assert (updated.title, updated.due_date) == ("B", date(2030, 1, 1))
 
-    assert updated_task is not None
-    assert updated_task.title == "Learn Java"
-    assert task.title == "Learn Java"
-
-
-def test_update_task_due_date():
-    task = create_task(title="Study AI")
-
-    new_due_date = date(2026, 11, 20)
-
-    updated_task = update_task(
-        task_id=task.id,
-        new_due_date=new_due_date
-    )
-
-    assert updated_task is not None
-    assert updated_task.due_date == new_due_date
-    assert task.due_date == new_due_date
+    updated = store.update_task(task.id, new_completed=True)
+    assert updated is not None
+    assert updated.completed is True
 
 
-def test_update_task_completion():
-    task = create_task(title="Learn Python")
-
-    updated_task = update_task(
-        task_id=task.id,
-        new_completed=True
-    )
-
-    assert updated_task is not None
-    assert updated_task.completed is True
-    assert task.completed is True
+def test_update_missing_returns_none():
+    assert store.update_task("nope", new_title="x") is None
 
 
-def test_update_nonexistent_task():
-    updated_task = update_task(
-        task_id="invalid-id",
-        new_title="New title"
-    )
+def test_complete_and_delete():
+    task = store.create_task("A")
 
-    assert updated_task is None
+    completed = store.complete_task(task.id)
+    assert completed is not None
+    assert completed.completed is True
+    assert store.complete_task("nope") is None
 
-
-def test_delete_task():
-    task = create_task(title="Learn Python")
-
-    result = delete_task(task.id)
-
-    assert result is True
-    assert task not in list_tasks()
-    assert len(list_tasks()) == 0
+    assert store.delete_task(task.id) is True
+    assert store.delete_task(task.id) is False
+    assert store.list_tasks() == []
 
 
-def test_delete_nonexistent_task():
-    result = delete_task("invalid-id")
+def test_returned_tasks_are_copies():
+    task = store.create_task("A")
+    task.title = "mutated"
+    store.list_tasks()[0].title = "mutated"
 
-    assert result is False
-
-
-def test_complete_task():
-    task = create_task(title="Finish project")
-
-    completed_task = complete_task(task.id)
-
-    assert completed_task is not None
-    assert completed_task.completed is True
-    assert task.completed is True
-
-
-def test_complete_nonexistent_task():
-    completed_task = complete_task("invalid-id")
-
-    assert completed_task is None
-
-
-def test_list_tasks():
-    task1 = create_task(title="Learn Python")
-    task2 = create_task(title="Learn FastAPI")
-
-    result = list_tasks()
-
-    assert len(result) == 2
-    assert task1 in result
-    assert task2 in result
-
-
-def test_list_tasks_empty():
-    result = list_tasks()
-
-    assert result == []
-    assert len(result) == 0
+    stored = store.get_task(task.id)
+    assert stored is not None
+    assert stored.title == "A"

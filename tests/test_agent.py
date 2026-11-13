@@ -1,363 +1,170 @@
-from datetime import date
-from unittest.mock import Mock
-
-import agent
-from models import AgentDecision
-
-from types import SimpleNamespace
+from datetime import date, timedelta
 
 import pytest
 
-from pydantic import ValidationError
+import agent
+import task_store as store
+from tests.conftest import next_weekday
 
+TOMORROW = date.today() + timedelta(days=1)
 
-def test_execute_create_task(monkeypatch):
-    mock_create_task = Mock(return_value="Task created")
 
-    monkeypatch.setattr(
-        agent,
-        "create_task",
-        mock_create_task
-    )
+# ---- validate_due_date ----------------------------------------------------
 
-    decision = AgentDecision(
-        action="create_task",
-        task_title="Learn Python",
-        due_date=date(2026, 11, 20)
-    )
+def test_validate_due_date_no_weekday_or_no_date():
+    assert agent.validate_due_date("buy milk", date(2030, 1, 1))
+    assert agent.validate_due_date("on friday", None)
 
-    result = agent.execute_decision(decision)
 
-    mock_create_task.assert_called_once_with(
-        title="Learn Python",
-        due_date=date(2026, 11, 20)
-    )
+def test_validate_due_date_matches_weekday():
+    friday = next_weekday("friday")
+    assert agent.validate_due_date("due Friday", friday)
+    assert not agent.validate_due_date("due Monday", friday)
 
-    assert result == "Task created"
 
+def test_validate_due_date_uses_latest_weekday():
+    friday = next_weekday("friday")
+    assert agent.validate_due_date("monday... no, friday", friday)
 
-def test_execute_update_task(monkeypatch):
-    mock_update_task = Mock(return_value="Task updated")
 
-    monkeypatch.setattr(agent, "update_task", mock_update_task)
+def test_get_validation_text_only_user_messages():
+    ctx = ["User: due monday", "TaskPilot: which friday?", "User: friday"]
+    assert agent.get_validation_text("friday", ctx) == "due monday\nfriday"
 
-    decision = AgentDecision(
-        action="update_task",
-        task_id="123",
-        new_title="Learn Java"
-    )
 
-    result = agent.execute_decision(decision)
+# ---- process_request: happy paths ----------------------------------------
 
-    mock_update_task.assert_called_once_with(
-        task_id="123",
-        new_title="Learn Java",
-        new_due_date=None
-    )
+def test_create_task(llm):
+    llm.add(action="create_task", task_title="Buy milk",
+            due_date=TOMORROW.isoformat())
+    resp = agent.process_request("add buy milk tomorrow")
+    assert not resp.needs_clarification
+    assert resp.task is not None
+    assert resp.task.title == "Buy milk"
+    assert store.list_tasks()[0].due_date == TOMORROW
 
-    assert result == "Task updated"
 
+def test_list_tasks_empty_and_non_empty(llm):
+    llm.add(action="list_tasks")
+    resp = agent.process_request("what do I have?")
+    assert resp.message == "You have no tasks yet."
 
-def test_execute_delete_task(monkeypatch):
-    mock_delete_task = Mock(return_value=True)
+    store.create_task("A")
+    llm.add(action="list_tasks")
+    resp = agent.process_request("list")
+    assert resp.tasks is not None
+    assert len(resp.tasks) == 1
 
-    monkeypatch.setattr(agent, "delete_task", mock_delete_task)
 
-    decision = AgentDecision(
-        action="delete_task",
-        task_id="123"
-    )
+def test_update_complete_delete(llm):
+    task = store.create_task("Report")
 
-    result = agent.execute_decision(decision)
+    llm.add(action="update_task", task_id=task.id, new_title="Final report")
+    resp = agent.process_request("rename")
+    assert resp.task is not None
+    assert resp.task.title == "Final report"
 
-    mock_delete_task.assert_called_once_with("123")
+    llm.add(action="complete_task", task_id=task.id)
+    resp = agent.process_request("done")
+    assert resp.task is not None
+    assert resp.task.completed
 
-    assert result is True
+    llm.add(action="delete_task", task_id=task.id)
+    resp = agent.process_request("delete it")
+    assert resp.message.startswith("Deleted")
+    assert store.list_tasks() == []
 
 
-def test_execute_complete_task(monkeypatch):
-    mock_complete_task = Mock(return_value="Task completed")
+def test_existing_tasks_are_sent_to_llm(llm):
+    store.create_task("Dentist")
+    llm.add(action="list_tasks")
+    agent.process_request("list")
+    assert "Dentist" in llm.calls[0][0]["content"]
 
-    monkeypatch.setattr(agent, "complete_task", mock_complete_task)
 
-    decision = AgentDecision(
-        action="complete_task",
-        task_id="123"
-    )
+# ---- clarification --------------------------------------------------------
 
-    result = agent.execute_decision(decision)
+def test_llm_clarify(llm):
+    llm.add(action="clarify", clarification="Which task?")
+    resp = agent.process_request("delete it")
+    assert resp.needs_clarification and resp.message == "Which task?"
 
-    mock_complete_task.assert_called_once_with("123")
 
-    assert result == "Task completed"
+def test_history_is_passed_to_llm(llm):
+    llm.add(action="create_task", task_title="Call mom")
+    agent.process_request(
+        "friday", history=["User: call mom", "TaskPilot: when?"])
+    sent = llm.calls[0][1]["content"]
+    assert "call mom" in sent and "User: friday" in sent
 
 
-def test_execute_list_tasks(monkeypatch):
-    mock_list_tasks = Mock(return_value=[])
+# ---- safety checks --------------------------------------------------------
 
-    monkeypatch.setattr(agent, "list_tasks", mock_list_tasks)
+@pytest.mark.parametrize("action", ["update_task", "delete_task", "complete_task"])
+def test_hallucinated_task_id_asks_for_clarification(llm, action):
+    store.create_task("Real")
+    llm.add(action=action, task_id="made-up", new_title="x")
+    resp = agent.process_request("do something")
+    assert resp.needs_clarification
+    assert len(store.list_tasks()) == 1
 
-    decision = AgentDecision(
-        action="list_tasks"
-    )
 
-    result = agent.execute_decision(decision)
+def test_create_without_title_asks_for_clarification(llm):
+    llm.add(action="create_task")
+    assert agent.process_request("add a task").needs_clarification
 
-    mock_list_tasks.assert_called_once_with()
 
-    assert result == []
+def test_update_without_changes_asks_for_clarification(llm):
+    task = store.create_task("A")
+    llm.add(action="update_task", task_id=task.id)
+    assert agent.process_request("update A").needs_clarification
 
 
-def test_execute_update_without_task_id(monkeypatch):
-    mock_update_task = Mock()
+def test_past_due_date_rejected(llm):
+    llm.add(action="create_task", task_title="Old",
+            due_date=(date.today() - timedelta(days=3)).isoformat())
+    resp = agent.process_request("add old task")
+    assert resp.needs_clarification and "past" in resp.message
+    assert store.list_tasks() == []
 
-    monkeypatch.setattr(agent, "update_task", mock_update_task)
 
-    decision = AgentDecision(
-        action="update_task"
-    )
+# ---- weekday retry --------------------------------------------------------
 
-    result = agent.execute_decision(decision)
+def test_weekday_mismatch_is_retried(llm):
+    llm.add(action="create_task", task_title="Gym",
+            due_date=next_weekday("monday").isoformat())
+    llm.add(action="create_task", task_title="Gym",
+            due_date=next_weekday("friday").isoformat())
+    resp = agent.process_request("gym on friday")
+    assert resp.task is not None
+    assert resp.task.due_date == next_weekday("friday")
+    assert "IMPORTANT CORRECTION" in llm.calls[1][0]["content"]
 
-    assert result == "Task ID is missing."
-    mock_update_task.assert_not_called()
 
+def test_weekday_mismatch_twice_gives_up(llm):
+    for _ in range(2):
+        llm.add(action="create_task", task_title="Gym",
+                due_date=next_weekday("monday").isoformat())
+    resp = agent.process_request("gym on friday")
+    assert resp.needs_clarification
+    assert store.list_tasks() == []
 
-def test_interpret_create_task(monkeypatch):
-    mock_generate = Mock(
-        return_value='{"action": "create_task", "task_title": "Learn Python"}')
-    monkeypatch.setattr(agent.provider, "generate", mock_generate)
 
-    decision = agent.interpret_request("Add a task to learn Python")
+# ---- failures -------------------------------------------------------------
 
-    assert decision.action == "create_task"
-    assert decision.task_title == "Learn Python"
+def test_invalid_json_raises_agent_error(llm):
+    llm.queue.append("not json")
+    with pytest.raises(agent.AgentError):
+        agent.process_request("hi")
 
 
-def test_interpret_create_task_with_due_date(monkeypatch):
-    mock_generate = Mock(
-        return_value='{"action": "create_task", "task_title": "Learn Python", "due_date": "2026-11-15"}'
-    )
-    monkeypatch.setattr(agent.provider, "generate", mock_generate)
+def test_unknown_action_raises_agent_error(llm):
+    llm.add(action="launch_rocket")
+    with pytest.raises(agent.AgentError):
+        agent.process_request("hi")
 
-    decision = agent.interpret_request(
-        "Add a task to learn Python by November 15")
 
-    assert decision.action == "create_task"
-    assert decision.task_title == "Learn Python"
-    assert decision.due_date == date(2026, 11, 15)
-
-
-def test_interpret_update_task(monkeypatch):
-    mock_generate = Mock(
-        return_value='{"action": "update_task", "task_id": "123", "new_title": "Study mathematics"}'
-    )
-    monkeypatch.setattr(agent.provider, "generate", mock_generate)
-
-    decision = agent.interpret_request("Rename task 123 to Study mathematics")
-
-    assert decision.action == "update_task"
-    assert decision.task_id == "123"
-    assert decision.new_title == "Study mathematics"
-
-
-def test_interpret_clarification(monkeypatch):
-    mock_generate = Mock(
-        return_value='{"action": "clarify", "clarification": "Which task are you referring to?"}'
-    )
-    monkeypatch.setattr(agent.provider, "generate", mock_generate)
-
-    decision = agent.interpret_request("Update my task")
-
-    assert decision.action == "clarify"
-    assert decision.clarification == "Which task are you referring to?"
-
-
-def test_interpret_empty_response(monkeypatch):
-    mock_generate = Mock(
-        side_effect=ValueError("LLM returned an empty response")
-    )
-    monkeypatch.setattr(agent.provider, "generate", mock_generate)
-
-    with pytest.raises(ValueError, match="LLM returned an empty response"):
-        agent.interpret_request("Show my tasks")
-
-
-def test_interpret_invalid_json(monkeypatch):
-    mock_generate = Mock(return_value="This is not valid JSON")
-    monkeypatch.setattr(agent.provider, "generate", mock_generate)
-
-    with pytest.raises(ValueError):
-        agent.interpret_request("Show my tasks")
-
-
-def test_process_request_clarification(monkeypatch):
-    decision = AgentDecision(
-        action="clarify",
-        clarification="Which task do you mean?"
-    )
-
-    mock_interpret = Mock(return_value=decision)
-    mock_execute = Mock()
-
-    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
-    monkeypatch.setattr(agent, "execute_decision", mock_execute)
-
-    result, needs_clarification = agent.process_request(
-        "Delete my task"
-    )
-
-    assert result == "Which task do you mean?"
-    assert needs_clarification is True
-
-    mock_execute.assert_not_called()
-
-
-def test_process_request_success(monkeypatch):
-    decision = AgentDecision(
-        action="create_task",
-        task_title="Learn Python"
-    )
-
-    mock_interpret = Mock(return_value=decision)
-    mock_execute = Mock(return_value="Task created")
-
-    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
-    monkeypatch.setattr(agent, "execute_decision", mock_execute)
-    monkeypatch.setattr(agent, "get_validation_text",
-                        Mock(return_value="Create a task"))
-
-    result, needs_clarification = agent.process_request(
-        "Create a task to learn Python"
-    )
-
-    assert result == "Task created"
-    assert needs_clarification is False
-    mock_execute.assert_called_once_with(decision)
-
-
-def test_process_request_correct_date(monkeypatch):
-    decision = AgentDecision(
-        action="create_task",
-        task_title="Study AI",
-        due_date=date(2026, 11, 16)
-    )
-
-    monkeypatch.setattr(agent, "interpret_request",
-                        Mock(return_value=decision))
-    monkeypatch.setattr(agent, "get_validation_text", Mock(
-        return_value="Create a task by Monday"))
-    mock_execute = Mock(return_value="Task created")
-    monkeypatch.setattr(agent, "execute_decision", mock_execute)
-
-    monkeypatch.setattr(agent, "validate_due_date", Mock(return_value=True))
-
-    result, needs_clarification = agent.process_request(
-        "Create a task by Monday"
-    )
-
-    assert result == "Task created"
-    assert needs_clarification is False
-    mock_execute.assert_called_once_with(decision)
-
-
-def test_process_request_date_retry_success(monkeypatch):
-    first_decision = AgentDecision(
-        action="create_task",
-        task_title="Study AI",
-        due_date=date(2026, 11, 17)
-    )
-
-    corrected_decision = AgentDecision(
-        action="create_task",
-        task_title="Study AI",
-        due_date=date(2026, 11, 16)
-    )
-
-    mock_interpret = Mock(
-        side_effect=[first_decision, corrected_decision]
-    )
-
-    mock_validate = Mock(side_effect=[False, True])
-    mock_execute = Mock(return_value="Task created")
-
-    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
-    monkeypatch.setattr(agent, "validate_due_date", mock_validate)
-    monkeypatch.setattr(agent, "get_validation_text",
-                        Mock(return_value="Monday"))
-    monkeypatch.setattr(agent, "execute_decision", mock_execute)
-
-    result, needs_clarification = agent.process_request(
-        "Create a task by Monday"
-    )
-
-    assert result == "Task created"
-    assert needs_clarification is False
-
-    assert mock_interpret.call_count == 2
-    assert mock_validate.call_count == 2
-    mock_execute.assert_called_once_with(corrected_decision)
-
-
-def test_process_request_date_retry_failure(monkeypatch):
-    decision = AgentDecision(
-        action="create_task",
-        task_title="Study AI",
-        due_date=date(2026, 11, 17)
-    )
-
-    mock_interpret = Mock(return_value=decision)
-    mock_validate = Mock(return_value=False)
-    mock_execute = Mock()
-
-    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
-    monkeypatch.setattr(agent, "validate_due_date", mock_validate)
-    monkeypatch.setattr(agent, "get_validation_text",
-                        Mock(return_value="Monday"))
-    monkeypatch.setattr(agent, "execute_decision", mock_execute)
-
-    result, needs_clarification = agent.process_request(
-        "Create a task by Monday"
-    )
-
-    assert isinstance(result, str)
-    assert "unable to confidently determine" in result
-    assert needs_clarification is True
-
-    assert mock_interpret.call_count == 2
-    mock_execute.assert_not_called()
-
-
-def test_process_request_retry_clarification(monkeypatch):
-    first_decision = AgentDecision(
-        action="create_task",
-        task_title="Study AI",
-        due_date=date(2026, 11, 17)
-    )
-
-    retry_decision = AgentDecision(
-        action="clarify",
-        clarification="Could you confirm the date?"
-    )
-
-    mock_interpret = Mock(
-        side_effect=[first_decision, retry_decision]
-    )
-
-    mock_execute = Mock()
-
-    monkeypatch.setattr(agent, "interpret_request", mock_interpret)
-    monkeypatch.setattr(agent, "validate_due_date", Mock(return_value=False))
-    monkeypatch.setattr(agent, "get_validation_text",
-                        Mock(return_value="Monday"))
-    monkeypatch.setattr(agent, "execute_decision", mock_execute)
-
-    result, needs_clarification = agent.process_request(
-        "Create a task by Monday"
-    )
-
-    assert result == "Could you confirm the date?"
-    assert needs_clarification is True
-
-    assert mock_interpret.call_count == 2
-    mock_execute.assert_not_called()
+def test_provider_failure_raises_agent_error(llm):
+    llm.queue.append(ConnectionError("down"))
+    with pytest.raises(agent.AgentError):
+        agent.process_request("hi")

@@ -19,7 +19,7 @@ class OllamaProvider(LLMProvider):
             model="qwen3:4b",
             messages=messages,
             format=response_format,
-            think=True
+            think=False
         )
 
         content = response.message.content
