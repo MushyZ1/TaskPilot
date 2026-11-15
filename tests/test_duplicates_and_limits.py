@@ -3,9 +3,9 @@ from datetime import date, timedelta
 import pytest
 from pydantic import ValidationError
 
-import agent
-from models import MAX_ACTIONS, AgentDecision, AgentPlan
-from task_store import list_tasks, reset_tasks
+import app.agent as agent
+from app.models import MAX_ACTIONS, AgentDecision, AgentPlan
+from app.task_store import list_tasks, reset_tasks
 
 
 @pytest.fixture(autouse=True)

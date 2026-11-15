@@ -8,7 +8,7 @@ import threading
 from datetime import date
 from uuid import uuid4
 
-from models import Task
+from app.models import Task
 
 _lock = threading.RLock()
 _tasks: dict[str, Task] = {}  # dicts keep insertion order

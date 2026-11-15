@@ -4,9 +4,9 @@ import logging
 
 from fastapi import FastAPI, HTTPException, Response
 
-from agent import AgentError, process_request
-from models import AgentRequest, AgentResponse, Task, TaskCreate, TaskUpdate
-from task_store import (
+from app.agent import AgentError, process_request
+from app.models import AgentRequest, AgentResponse, Task, TaskCreate, TaskUpdate
+from app.task_store import (
     create_task,
     delete_task,
     get_task,

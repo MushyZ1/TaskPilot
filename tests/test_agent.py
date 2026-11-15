@@ -2,8 +2,8 @@ from datetime import date, timedelta
 
 import pytest
 
-import agent
-import task_store as store
+import app.agent as agent
+import app.task_store as store
 from tests.conftest import next_weekday
 
 TOMORROW = date.today() + timedelta(days=1)

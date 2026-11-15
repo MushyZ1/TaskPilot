@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-import task_store as store
+import app.task_store as store
 
 
 def test_create_and_list():

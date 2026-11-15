@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-import task_store as store
-from api import app
+import app.task_store as store
+from app.api import app
 
 client = TestClient(app)
 

@@ -4,8 +4,8 @@ from typing import Any
 
 import pytest
 
-import agent
-import task_store
+import app.agent as agent
+import app.task_store as task_store
 
 
 class FakeLLM:

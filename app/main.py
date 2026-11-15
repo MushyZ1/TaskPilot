@@ -1,7 +1,7 @@
 """Interactive command-line interface for TaskPilot."""
 
-from agent import AgentError, process_request
-from models import AgentResponse
+from app.agent import AgentError, process_request
+from app.models import AgentResponse
 import logging
 import os
 

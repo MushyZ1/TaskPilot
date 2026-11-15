@@ -2,9 +2,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
 
-import llm_provider
-from llm_provider import OllamaProvider
-from llm_provider import OpenAICompatibleProvider
+import app.llm_provider as llm_provider
+from app.llm_provider import OllamaProvider
+from app.llm_provider import OpenAICompatibleProvider
 
 
 def test_ollama_provider_generate(monkeypatch):

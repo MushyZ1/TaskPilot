@@ -3,9 +3,9 @@ from datetime import date, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-import agent
-import task_store as store
-from api import app
+import app.agent as agent
+import app.task_store as store
+from app.api import app
 from tests.conftest import next_weekday
 
 TOMORROW = date.today() + timedelta(days=1)

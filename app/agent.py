@@ -9,9 +9,9 @@ from datetime import date, timedelta
 
 from pydantic import ValidationError
 
-from llm_provider import LLMProvider, get_provider
-from models import MAX_ACTIONS, AgentDecision, AgentPlan, AgentResponse, Task
-from task_store import (
+from app.llm_provider import LLMProvider, get_provider
+from app.models import MAX_ACTIONS, AgentDecision, AgentPlan, AgentResponse, Task
+from app.task_store import (
     complete_task,
     create_task,
     delete_task,
